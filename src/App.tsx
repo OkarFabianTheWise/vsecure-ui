@@ -17,6 +17,7 @@ function App() {
   const [status, setStatus] = useState("idle");
   const [expertise, setExpertise] = useState<ExpertiseTier>("beginner");
   const [activeStage, setActiveStage] = useState<Stage>("stage1");
+  const [loading, setLoading] = useState(false);
 
   const [contextForm, setContextForm] = useState({
     projectName: "Customer API",
@@ -35,63 +36,91 @@ function App() {
   const [handoffSummary, setHandoffSummary] = useState<any>(null);
 
   const createSession = async () => {
+    setLoading(true);
     const id = `session-${Date.now()}`;
     try {
-      await postWebhook("session:create", { sessionId: id, user: "dev", expertiseTier: expertise });
-      setSessionId(id);
+      const resp = await postWebhook("session:create", { sessionId: id, user: "dev", expertiseTier: expertise });
+      setSessionId(resp.session?.sessionId || id);
       setStatus("Session created");
-    } catch {
-      setStatus("Failed to create session");
+      setActiveStage("stage1");
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || "Failed to create session";
+      setStatus(`Session create failed: ${msg}`);
+    } finally {
+      setLoading(false);
     }
   };
 
   const saveContext = async () => {
     if (!sessionId) return setStatus("Create session first");
-    await postWebhook("stage:update", { sessionId, stage: "context", data: contextForm });
-    setStatus("Stage 1 context saved");
+    setLoading(true);
+    try {
+      await postWebhook("stage:update", { sessionId, stage: "context", data: contextForm });
+      setStatus("Stage 1 context saved");
 
-    const threatResult = await postWebhook("analyze:threat", { context: contextForm });
-    const inferredThreats: string[] = Array.isArray(threatResult.analysis)
-      ? threatResult.analysis.map((item: any) => `${item.cwe}: ${item.threat}`)
-      : ["CWE-20: Input validation"];
-    setThreats(inferredThreats);
-    setSelectedThreats([inferredThreats[0]]);
-    setThreatAnalysis(inferredThreats);
-
-    setActiveStage("stage2");
+      const threatResult = await postWebhook("analyze:threat", { context: contextForm });
+      const inferredThreats: string[] = Array.isArray(threatResult.analysis)
+        ? threatResult.analysis.map((item: any) => `${item.cwe}: ${item.threat}`)
+        : ["CWE-20: Input validation"];
+      setThreats(inferredThreats);
+      setSelectedThreats([inferredThreats[0]]);
+      setThreatAnalysis(inferredThreats);
+      setActiveStage("stage2");
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || "Failed to save context";
+      setStatus(`Context save failed: ${msg}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const confirmThreats = async () => {
     if (!sessionId) return setStatus("Create session first");
-    await postWebhook("stage:complete", { sessionId, stage: "threat", results: { threats: selectedThreats } });
-    setStatus("Threat mapping confirmed");
-    setActiveStage("stage3");
-    setCodeOutput(`// Generated secure endpoint example\nimport express from 'express';\nconst app = express();\napp.use(express.json());\napp.post('/register', (req, res) => {\n  const { username, password } = req.body;\n  // Input validation\n  if (!username || !password) return res.status(400).json({ error: 'missing fields' });\n  // Parameterized query\n  const stmt = 'INSERT INTO users (username, password) VALUES (?, ?)';\n  // ... execute safely ...\n  res.status(201).json({ success: true });\n});`);
-    setUncertaintyFlags(["UNCERTAIN: Encryption method for stored credentials", "UNCERTAIN: Session token expiry policy"]);
+    setLoading(true);
+    try {
+      await postWebhook("stage:complete", { sessionId, stage: "threat", results: { threats: selectedThreats } });
+      setStatus("Threat mapping confirmed");
+      setActiveStage("stage3");
+      setCodeOutput(`// Generated secure endpoint example\nimport express from 'express';\nconst app = express();\napp.use(express.json());\napp.post('/register', (req, res) => {\n  const { username, password } = req.body;\n  // Input validation\n  if (!username || !password) return res.status(400).json({ error: 'missing fields' });\n  // Parameterized query\n  const stmt = 'INSERT INTO users (username, password) VALUES (?, ?)';\n  // ... execute safely ...\n  res.status(201).json({ success: true });\n});`);
+      setUncertaintyFlags(["UNCERTAIN: Encryption method for stored credentials", "UNCERTAIN: Session token expiry policy"]);
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || "Failed to confirm threats";
+      setStatus(`Threat confirm failed: ${msg}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const finalizeGeneration = async () => {
     if (!sessionId) return setStatus("Create session first");
-    const payload = { code: codeOutput };
-    const codeIngest = await postWebhook("analyze:code", payload);
-    const codeFindings: string[] = Array.isArray(codeIngest.findings)
-      ? codeIngest.findings.map((f: any) => `${f.cwe}: ${f.message} (line ${f.line})`)
-      : [];
-    setCodeAnalysis(codeFindings);
+    setLoading(true);
+    try {
+      const payload = { code: codeOutput };
+      const codeIngest = await postWebhook("analyze:code", payload);
+      const codeFindings: string[] = Array.isArray(codeIngest.findings)
+        ? codeIngest.findings.map((f: any) => `${f.cwe}: ${f.message} (line ${f.line})`)
+        : [];
+      setCodeAnalysis(codeFindings);
 
-    await postWebhook("stage:complete", { sessionId, stage: "generation", results: { code: codeOutput, flags: uncertaintyFlags, analysis: codeFindings } });
-    setStatus("Stage 3 complete");
-    setActiveStage("stage5");
-    setHandoffSummary({
-      sessionId,
-      context: contextForm,
-      threats: selectedThreats,
-      threatAnalysis,
-      code: codeOutput,
-      codeAnalysis: codeFindings,
-      uncertaintyFlags,
-      recommendedChecks: ["Verify dependency versions", "Run Semgrep scan", "Rotate credentials"]
-    });
+      await postWebhook("stage:complete", { sessionId, stage: "generation", results: { code: codeOutput, flags: uncertaintyFlags, analysis: codeFindings } });
+      setStatus("Stage 3 complete");
+      setActiveStage("stage5");
+      setHandoffSummary({
+        sessionId,
+        context: contextForm,
+        threats: selectedThreats,
+        threatAnalysis,
+        code: codeOutput,
+        codeAnalysis: codeFindings,
+        uncertaintyFlags,
+        recommendedChecks: ["Verify dependency versions", "Run Semgrep scan", "Rotate credentials"]
+      });
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || "Failed to finalize generation";
+      setStatus(`Generation failed: ${msg}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const exportJson = () => {
@@ -116,7 +145,7 @@ function App() {
           <option value="intermediate">Intermediate</option>
           <option value="expert">Expert</option>
         </select>
-        <button style={{ marginLeft: 8 }} onClick={createSession}>Create Session</button>
+        <button style={{ marginLeft: 8, opacity: loading ? 0.6 : 1 }} onClick={createSession} disabled={loading}>{loading ? "Creating..." : "Create Session"}</button>
         <span style={{ marginLeft: 10 }}><strong>Session:</strong> {sessionId || "none"}</span>
       </section>
 
@@ -140,7 +169,7 @@ function App() {
             <label>Deployment<input value={contextForm.deployment} onChange={(e) => setContextForm({ ...contextForm, deployment: e.target.value })} /></label>
             <label>Compliance<input value={contextForm.compliance} onChange={(e) => setContextForm({ ...contextForm, compliance: e.target.value })} /></label>
           </div>
-          <button style={{ marginTop: 8 }} onClick={saveContext}>Save Context and Continue</button>
+          <button style={{ marginTop: 8, opacity: loading ? 0.6 : 1 }} onClick={saveContext} disabled={loading}>{loading ? "Saving..." : "Save Context and Continue"}</button>
         </section>
       )}
 
@@ -163,7 +192,7 @@ function App() {
               <ul>{threatAnalysis.map((a) => <li key={a}>{a}</li>)}</ul>
             </div>
           )}
-          <button style={{ marginTop: 8 }} onClick={confirmThreats}>Confirm Threat Mapping</button>
+          <button style={{ marginTop: 8, opacity: loading ? 0.6 : 1 }} onClick={confirmThreats} disabled={loading}>{loading ? "Confirming..." : "Confirm Threat Mapping"}</button>
         </section>
       )}
 
@@ -177,7 +206,7 @@ function App() {
             <strong>Uncertainty flags:</strong>
             <ul>{uncertaintyFlags.map((f) => <li key={f}>{f}</li>)}</ul>
           </div>
-          <button onClick={finalizeGeneration}>Finalize Generation</button>
+          <button style={{ opacity: loading ? 0.6 : 1 }} onClick={finalizeGeneration} disabled={loading}>{loading ? "Analyzing..." : "Finalize Generation"}</button>
         </section>
       )}
 
@@ -197,7 +226,7 @@ function App() {
       )}
 
       <footer style={{ marginTop: 16, borderTop: "1px solid #e5e7eb", paddingTop: 8 }}>
-        <strong>Status:</strong> {status}
+        <strong>Status:</strong> {status} {loading && <span aria-live="polite">⏳</span>}
       </footer>
     </main>
   );
