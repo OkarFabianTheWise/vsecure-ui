@@ -28,7 +28,9 @@ function App() {
 
   const [threats, setThreats] = useState<string[]>([]);
   const [selectedThreats, setSelectedThreats] = useState<string[]>([]);
+  const [threatAnalysis, setThreatAnalysis] = useState<string[]>([]);
   const [codeOutput, setCodeOutput] = useState("// Generated code will appear here");
+  const [codeAnalysis, setCodeAnalysis] = useState<string[]>([]);
   const [uncertaintyFlags, setUncertaintyFlags] = useState<string[]>([]);
   const [handoffSummary, setHandoffSummary] = useState<any>(null);
 
@@ -47,10 +49,16 @@ function App() {
     if (!sessionId) return setStatus("Create session first");
     await postWebhook("stage:update", { sessionId, stage: "context", data: contextForm });
     setStatus("Stage 1 context saved");
+
+    const threatResult = await postWebhook("analyze:threat", { context: contextForm });
+    const inferredThreats: string[] = Array.isArray(threatResult.analysis)
+      ? threatResult.analysis.map((item: any) => `${item.cwe}: ${item.threat}`)
+      : ["CWE-20: Input validation"];
+    setThreats(inferredThreats);
+    setSelectedThreats([inferredThreats[0]]);
+    setThreatAnalysis(inferredThreats);
+
     setActiveStage("stage2");
-    const mapped = ["CWE-89: SQL Injection", "CWE-22: Path Traversal", "CWE-78: OS Command Injection"];
-    setThreats(mapped);
-    setSelectedThreats([mapped[0], mapped[1]]);
   };
 
   const confirmThreats = async () => {
@@ -64,14 +72,23 @@ function App() {
 
   const finalizeGeneration = async () => {
     if (!sessionId) return setStatus("Create session first");
-    await postWebhook("stage:complete", { sessionId, stage: "generation", results: { code: codeOutput, flags: uncertaintyFlags } });
+    const payload = { code: codeOutput };
+    const codeIngest = await postWebhook("analyze:code", payload);
+    const codeFindings: string[] = Array.isArray(codeIngest.findings)
+      ? codeIngest.findings.map((f: any) => `${f.cwe}: ${f.message} (line ${f.line})`)
+      : [];
+    setCodeAnalysis(codeFindings);
+
+    await postWebhook("stage:complete", { sessionId, stage: "generation", results: { code: codeOutput, flags: uncertaintyFlags, analysis: codeFindings } });
     setStatus("Stage 3 complete");
     setActiveStage("stage5");
     setHandoffSummary({
       sessionId,
       context: contextForm,
       threats: selectedThreats,
+      threatAnalysis,
       code: codeOutput,
+      codeAnalysis: codeFindings,
       uncertaintyFlags,
       recommendedChecks: ["Verify dependency versions", "Run Semgrep scan", "Rotate credentials"]
     });
@@ -140,6 +157,12 @@ function App() {
               }} /> {t}</label>
             </div>
           ))}
+          {threatAnalysis.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <strong>Threat analysis details:</strong>
+              <ul>{threatAnalysis.map((a) => <li key={a}>{a}</li>)}</ul>
+            </div>
+          )}
           <button style={{ marginTop: 8 }} onClick={confirmThreats}>Confirm Threat Mapping</button>
         </section>
       )}
@@ -163,6 +186,12 @@ function App() {
           <h2>Stage 5: Collaborative Handoff</h2>
           <p><strong>Session summary:</strong></p>
           <pre style={{ background: "#f8fafc", border: "1px solid #d1d5db" }}>{JSON.stringify(handoffSummary, null, 2)}</pre>
+          {codeAnalysis.length > 0 && (
+            <div>
+              <strong>Code analysis findings:</strong>
+              <ul>{codeAnalysis.map((item) => <li key={item}>{item}</li>)}</ul>
+            </div>
+          )}
           <button onClick={exportJson}>Export JSON</button>
         </section>
       )}
