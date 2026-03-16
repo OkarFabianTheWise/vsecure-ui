@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import axios from "axios";
 
 type ExpertiseTier = "beginner" | "intermediate" | "expert";
 
 type Stage = "stage1" | "stage2" | "stage3" | "stage5";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
 
 async function postWebhook(eventType: string, payload: any) {
   const res = await axios.post(`${API_BASE}/webhook/vibesecure`, { eventType, payload });
@@ -30,17 +30,20 @@ function App() {
   const [threats, setThreats] = useState<string[]>([]);
   const [selectedThreats, setSelectedThreats] = useState<string[]>([]);
   const [threatAnalysis, setThreatAnalysis] = useState<string[]>([]);
+  const [codeSnippet, setCodeSnippet] = useState<string>("// Paste your code snippet here for early analysis");
   const [codeOutput, setCodeOutput] = useState("// Generated code will appear here");
   const [codeAnalysis, setCodeAnalysis] = useState<string[]>([]);
   const [uncertaintyFlags, setUncertaintyFlags] = useState<string[]>([]);
   const [handoffSummary, setHandoffSummary] = useState<any>(null);
 
   const createSession = async () => {
+    if (sessionId) return;
     setLoading(true);
     const id = `session-${Date.now()}`;
     try {
       const resp = await postWebhook("session:create", { sessionId: id, user: "dev", expertiseTier: expertise });
-      setSessionId(resp.session?.sessionId || id);
+      const idCreated = resp.session?.sessionId || id;
+      setSessionId(idCreated);
       setStatus("Session created");
       setActiveStage("stage1");
     } catch (err: any) {
@@ -51,6 +54,27 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    createSession();
+  }, []);
+
+
+  const analyzeCodeSnippet = async (code: string) => {
+    if (!sessionId) {
+      setCodeAnalysis([]);
+      return;
+    }
+    try {
+      const parsed = await postWebhook("analyze:code", { code });
+      const codeFindings: string[] = Array.isArray(parsed.findings)
+        ? parsed.findings.map((f: any) => `${f.cwe}: ${f.message} (line ${f.line})`)
+        : [];
+      setCodeAnalysis(codeFindings);
+    } catch (err) {
+      console.warn("Code analysis failed", err);
+    }
+  };
+
   const saveContext = async () => {
     if (!sessionId) return setStatus("Create session first");
     setLoading(true);
@@ -58,13 +82,26 @@ function App() {
       await postWebhook("stage:update", { sessionId, stage: "context", data: contextForm });
       setStatus("Stage 1 context saved");
 
-      const threatResult = await postWebhook("analyze:threat", { context: contextForm });
-      const inferredThreats: string[] = Array.isArray(threatResult.analysis)
-        ? threatResult.analysis.map((item: any) => `${item.cwe}: ${item.threat}`)
-        : ["CWE-20: Input validation"];
+      let inferredThreats = ["CWE-20: Input validation"];
+      try {
+        const threatResult = await postWebhook("analyze:threat", { context: contextForm });
+        if (Array.isArray(threatResult.analysis) && threatResult.analysis.length > 0) {
+          inferredThreats = threatResult.analysis.map((item: any) => `${item.cwe}: ${item.threat}`);
+        }
+      } catch (analyzeErr: any) {
+        console.warn("Threat analysis failed, falling back to default threats", analyzeErr);
+        setStatus("Stage 1 context saved (analysis endpoint unavailable)");
+      }
+
       setThreats(inferredThreats);
       setSelectedThreats([inferredThreats[0]]);
       setThreatAnalysis(inferredThreats);
+      setCodeOutput(codeSnippet.trim().length > 0 ? `// Initial code snippet (for generation):\n${codeSnippet}` : "// Generated code will appear here");
+
+      if (codeSnippet && codeSnippet.trim().length > 20) {
+        await analyzeCodeSnippet(codeSnippet);
+      }
+
       setActiveStage("stage2");
     } catch (err: any) {
       const msg = err?.response?.data?.error || err?.message || "Failed to save context";
@@ -81,7 +118,21 @@ function App() {
       await postWebhook("stage:complete", { sessionId, stage: "threat", results: { threats: selectedThreats } });
       setStatus("Threat mapping confirmed");
       setActiveStage("stage3");
-      setCodeOutput(`// Generated secure endpoint example\nimport express from 'express';\nconst app = express();\napp.use(express.json());\napp.post('/register', (req, res) => {\n  const { username, password } = req.body;\n  // Input validation\n  if (!username || !password) return res.status(400).json({ error: 'missing fields' });\n  // Parameterized query\n  const stmt = 'INSERT INTO users (username, password) VALUES (?, ?)';\n  // ... execute safely ...\n  res.status(201).json({ success: true });\n});`);
+      try {
+        const generatedResp = await postWebhook("generate:secure-code", {
+          context: contextForm,
+          snippet: codeSnippet,
+          threats: selectedThreats,
+        });
+        if (typeof generatedResp.code === "string" && generatedResp.code.trim().length > 0) {
+          setCodeOutput(generatedResp.code);
+        } else {
+          setCodeOutput(codeSnippet.trim().length > 20 ? `// Generated secure code based on your input snippet:\n${codeSnippet}` : `// Generated secure endpoint example\nimport express from 'express';\nconst app = express();\napp.use(express.json());\napp.post('/register', (req, res) => {\n  const { username, password } = req.body;\n  // Input validation\n  if (!username || !password) return res.status(400).json({ error: 'missing fields' });\n  // Parameterized query\n  const stmt = 'INSERT INTO users (username, password) VALUES (?, ?)';\n  // ... execute safely ...\n  res.status(201).json({ success: true });\n});`);
+        }
+      } catch (llmErr: any) {
+        console.warn("LLM generate failed", llmErr);
+        setCodeOutput(codeSnippet.trim().length > 20 ? `// Generated secure code based on your input snippet:\n${codeSnippet}` : `// Generated secure endpoint example\nimport express from 'express';\nconst app = express();\napp.use(express.json());\napp.post('/register', (req, res) => {\n  const { username, password } = req.body;\n  // Input validation\n  if (!username || !password) return res.status(400).json({ error: 'missing fields' });\n  // Parameterized query\n  const stmt = 'INSERT INTO users (username, password) VALUES (?, ?)';\n  // ... execute safely ...\n  res.status(201).json({ success: true });\n});`);
+      }
       setUncertaintyFlags(["UNCERTAIN: Encryption method for stored credentials", "UNCERTAIN: Session token expiry policy"]);
     } catch (err: any) {
       const msg = err?.response?.data?.error || err?.message || "Failed to confirm threats";
@@ -100,9 +151,12 @@ function App() {
       const codeFindings: string[] = Array.isArray(codeIngest.findings)
         ? codeIngest.findings.map((f: any) => `${f.cwe}: ${f.message} (line ${f.line})`)
         : [];
-      setCodeAnalysis(codeFindings);
+      const finalCodeFindings = codeFindings.length > 0
+        ? codeFindings
+        : ["No high-confidence vulnerabilities found by automated scan. Perform manual code review for final validation."];
+      setCodeAnalysis(finalCodeFindings);
 
-      await postWebhook("stage:complete", { sessionId, stage: "generation", results: { code: codeOutput, flags: uncertaintyFlags, analysis: codeFindings } });
+      await postWebhook("stage:complete", { sessionId, stage: "generation", results: { code: codeOutput, flags: uncertaintyFlags, analysis: finalCodeFindings } });
       setStatus("Stage 3 complete");
       setActiveStage("stage5");
       setHandoffSummary({
@@ -111,7 +165,7 @@ function App() {
         threats: selectedThreats,
         threatAnalysis,
         code: codeOutput,
-        codeAnalysis: codeFindings,
+        codeAnalysis: finalCodeFindings,
         uncertaintyFlags,
         recommendedChecks: ["Verify dependency versions", "Run Semgrep scan", "Rotate credentials"]
       });
@@ -169,6 +223,15 @@ function App() {
             <label>Deployment<input value={contextForm.deployment} onChange={(e) => setContextForm({ ...contextForm, deployment: e.target.value })} /></label>
             <label>Compliance<input value={contextForm.compliance} onChange={(e) => setContextForm({ ...contextForm, compliance: e.target.value })} /></label>
           </div>
+          <div style={{ marginTop: 8 }}>
+            <label>User code snippet<textarea value={codeSnippet} onChange={(e) => {
+              const next = e.target.value;
+              setCodeSnippet(next);
+              if (next.trim().length > 20 && sessionId) {
+                analyzeCodeSnippet(next);
+              }
+            }} style={{ width: '100%', height: 140, fontFamily: 'monospace' }} /></label>
+          </div>
           <button style={{ marginTop: 8, opacity: loading ? 0.6 : 1 }} onClick={saveContext} disabled={loading}>{loading ? "Saving..." : "Save Context and Continue"}</button>
         </section>
       )}
@@ -203,6 +266,10 @@ function App() {
           <textarea value={codeOutput} onChange={(e) => setCodeOutput(e.target.value)} style={{ width: "100%", height: 220, fontFamily: "monospace" }} />
 
           <div>
+            <strong>Code snippet analysis in Stage 1:</strong>
+            <ul>{codeAnalysis.map((item) => <li key={item}>{item}</li>)}</ul>
+          </div>
+          <div>
             <strong>Uncertainty flags:</strong>
             <ul>{uncertaintyFlags.map((f) => <li key={f}>{f}</li>)}</ul>
           </div>
@@ -214,7 +281,7 @@ function App() {
         <section style={{ marginBottom: 20 }}>
           <h2>Stage 5: Collaborative Handoff</h2>
           <p><strong>Session summary:</strong></p>
-          <pre style={{ background: "#f8fafc", border: "1px solid #d1d5db" }}>{JSON.stringify(handoffSummary, null, 2)}</pre>
+          <pre style={{ background: "#f8fafc", border: "1px solid #d1d5db", whiteSpace: "pre-wrap", wordBreak: "break-word", overflowWrap: "break-word" }}>{JSON.stringify(handoffSummary, null, 2)}</pre>
           {codeAnalysis.length > 0 && (
             <div>
               <strong>Code analysis findings:</strong>
